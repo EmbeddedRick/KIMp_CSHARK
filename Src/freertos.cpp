@@ -57,7 +57,7 @@
 #define MSK_UHF_FLAGS				0x00000001U
 #define MSK_SBD_FLAGS				0x00000010U
 
-#define ID_SAT_OFFSET				(11)
+#define ID_FIELD_OFFSET				(11)
 #define THIS_PILOT_ID				(105)
 #define SIDE_PNL_ADDR				(20)
 
@@ -140,6 +140,8 @@ osMessageQueueId_t TelecmdQueueHandle;
 osMessageQueueId_t STelemQueueHandle;
 osEventFlagsId_t frequencyFlagsHandle;
 osMutexId_t spi_mutex;
+
+void sendToSidePnl(uint8_t pss_buf, uint8_t pss_length);
 /* USER CODE END FunctionPrototypes */
 
 void StartUhfTask(void *argument);
@@ -198,8 +200,17 @@ void StartUhfTask(void *argument)
 			uhf.rx_done = false;
 			/* Analyze the packet, for this follow the steps:
 			 * 		1. Check CRC (optional, acceptable LoRa packets passed its own CRC already)
-			 * 		2. Check SATELLITE ID field, if it doesn't match, deliver to Side Pannel
+			 * 		2. Check SATELLITE ID field, if it doesn't match, deliver to Side Panel and continue
 			 * */
+			uint16_t sat_id = uhf.rx_buffer[ID_FIELD_OFFSET]<<8 || uhf.rx_buffer[ID_FIELD_OFFSET+1];
+			if(sat_id != THIS_PILOT_ID){
+				sendToSidePnl(uhf.rx_buffer, uhf.rx_buffer_lenght);
+				memset(uhf.rx_buffer, 0, sizeof(uhf.rx_buffer));
+				// ======================================
+				uint8_t buf_sent[] = "ACK";
+				uhf.radio_tx_custom(buf_sent, sizeof(buf_sent));
+				continue;
+			}
 			telepkt_t valid_msg;
 			valid_msg.freq = UHF_BAND;									// Working frequency
 			valid_msg.length = uhf.rx_buffer_lenght; 					// Length of the packet payload
@@ -230,8 +241,17 @@ void StartSbandTask(void *argument)
 			sbd.rx_done = false;
 			/* Analyze the packet, for this follow the steps:
 			 * 		1. Check CRC (optional, acceptable LoRa packets passed its own CRC already)
-			 * 		2. Check SATELLITE ID field, if it doesn't match, deliver to Side Pannel
+			 * 		2. Check SATELLITE ID field, if it doesn't match, deliver to Side Panel and continue
 			 * */
+			uint16_t sat_id = sbd.rx_buffer[ID_FIELD_OFFSET]<<8 || sbd.rx_buffer[ID_FIELD_OFFSET+1];
+			if(sat_id != THIS_PILOT_ID){
+				sendToSidePnl(uhf.rx_buffer, uhf.rx_buffer_lenght);
+				memset(sbd.rx_buffer, 0, sizeof(uhf.rx_buffer));
+				// ======================================
+				uint8_t buf_sent[] = "ACK";
+				sbd.radio_tx_custom(buf_sent, sizeof(buf_sent));
+				continue;
+			}
 			telepkt_t valid_msg;
 			valid_msg.freq = S_BAND;									// Working frequency
 			valid_msg.length = sbd.rx_buffer_lenght; 					// Length of the packet payload
@@ -323,6 +343,10 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 {
 	if(ptr != NULL) free(ptr);
+}
+
+void sendToSidePnl(uint8_t pss_buf, uint8_t pss_length){
+	HAL_I2C_Master_Transmit(&hi2c1,SIDE_PNL_ADDR,pss_buf,pss_length,1000);
 }
 /* USER CODE END Application */
 
