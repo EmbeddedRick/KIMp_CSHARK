@@ -8,6 +8,7 @@
 #ifndef KIM_SDK_LR211_DRIVER_RADIO_H_
 #define KIM_SDK_LR211_DRIVER_RADIO_H_
 
+#include "i2c.h"
 #include "spi.h"
 #include "usart.h"
 #include "gpio.h"

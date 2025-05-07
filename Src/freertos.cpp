@@ -48,8 +48,7 @@
 #define HEADER_LEN	(2)    	   	// To all subsystems, two 16bit header
 // __________________KIM DEPENDANT_________________________ //
 #define TCQUEUE_OBJECTS 			(5)  // Telecommand Queue
-#define UHFQUEUE_OBJECTS 			(5)  // UHF Queue
-#define SBDQUEUE_OBJECTS 			(10) // Sband Queue
+#define TMQUEUE_OBJECTS 			(10) // Telemetry Queue
 
 #define MAX_TX_POWER_SBD			(13) // Maximum PWR for Freqs around 2.4GHz
 #define MAX_TX_POWER_SUB2G4			(22) // Maximum PWR for Freqs under 2.4GHz
@@ -135,13 +134,11 @@ const osThreadAttr_t SBAND_Task_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-osMessageQueueId_t UHFTelemQueueHandle;
+osMessageQueueId_t TelemQueueHandle;
 osMessageQueueId_t TelecmdQueueHandle;
-osMessageQueueId_t STelemQueueHandle;
 osEventFlagsId_t frequencyFlagsHandle;
 osMutexId_t spi_mutex;
-
-void sendToSidePnl(uint8_t pss_buf, uint8_t pss_length);
+void sendToSidePnl(uint8_t* pss_buf, uint8_t pss_length);
 /* USER CODE END FunctionPrototypes */
 
 void StartUhfTask(void *argument);
@@ -163,9 +160,7 @@ void MX_FREERTOS_Init(void) {
 	/* creation of TelecmdQueue */
 	TelecmdQueueHandle = osMessageQueueNew (TCQUEUE_OBJECTS, sizeof(telepkt_t),NULL);
 	/* creation of UHFTelemQueue */
-	UHFTelemQueueHandle = osMessageQueueNew (UHFQUEUE_OBJECTS, sizeof(telepkt_t), NULL);
-	/* creation of STelemQueue */
-	STelemQueueHandle = osMessageQueueNew (SBDQUEUE_OBJECTS, sizeof(telepkt_t), NULL);
+	TelemQueueHandle = osMessageQueueNew (TMQUEUE_OBJECTS, sizeof(telepkt_t), NULL);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -201,6 +196,7 @@ void StartUhfTask(void *argument)
 			/* Analyze the packet, for this follow the steps:
 			 * 		1. Check CRC (optional, acceptable LoRa packets passed its own CRC already)
 			 * 		2. Check SATELLITE ID field, if it doesn't match, deliver to Side Panel and continue
+			 * 		3. If matches, add the message to telecommand queue
 			 * */
 			uint16_t sat_id = uhf.rx_buffer[ID_FIELD_OFFSET]<<8 || uhf.rx_buffer[ID_FIELD_OFFSET+1];
 			if(sat_id != THIS_PILOT_ID){
@@ -208,7 +204,7 @@ void StartUhfTask(void *argument)
 				memset(uhf.rx_buffer, 0, sizeof(uhf.rx_buffer));
 				// ======================================
 				uint8_t buf_sent[] = "ACK";
-				uhf.radio_tx_custom(buf_sent, sizeof(buf_sent));
+				uhf.radio_tx_custom(buf_sent, sizeof(buf_sent));		// Directly downlink, no queue
 				continue;
 			}
 			telepkt_t valid_msg;
@@ -242,14 +238,15 @@ void StartSbandTask(void *argument)
 			/* Analyze the packet, for this follow the steps:
 			 * 		1. Check CRC (optional, acceptable LoRa packets passed its own CRC already)
 			 * 		2. Check SATELLITE ID field, if it doesn't match, deliver to Side Panel and continue
+			 * 		3. If matches, add the message to telecommand queue
 			 * */
 			uint16_t sat_id = sbd.rx_buffer[ID_FIELD_OFFSET]<<8 || sbd.rx_buffer[ID_FIELD_OFFSET+1];
 			if(sat_id != THIS_PILOT_ID){
-				sendToSidePnl(uhf.rx_buffer, uhf.rx_buffer_lenght);
+				sendToSidePnl(sbd.rx_buffer, sbd.rx_buffer_lenght);
 				memset(sbd.rx_buffer, 0, sizeof(uhf.rx_buffer));
 				// ======================================
 				uint8_t buf_sent[] = "ACK";
-				sbd.radio_tx_custom(buf_sent, sizeof(buf_sent));
+				sbd.radio_tx_custom(buf_sent, sizeof(buf_sent));		// Directly downlink, no queue
 				continue;
 			}
 			telepkt_t valid_msg;
@@ -328,14 +325,14 @@ void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
     	valid_msg.freq = UHF_BAND;						// Working frequency
     	valid_msg.length = len; 						// Length of the packet payload
     	memcpy(valid_msg.buffer,ptr, len);				// Packet payload buffer
-    	osMessageQueuePut(UHFTelemQueueHandle, &valid_msg, 0U, 0U);
+    	osMessageQueuePut(TelemQueueHandle, &valid_msg, 0U, 0U);
     	free(ptr);
     }else if(register_map == SBAND_DLNK){
     	telepkt_t valid_msg;
     	valid_msg.freq = S_BAND;						// Working frequency
     	valid_msg.length = len; 						// Length of the packet payload
     	memcpy(valid_msg.buffer,ptr, len);				// Packet payload buffer
-    	osMessageQueuePut(STelemQueueHandle, &valid_msg, 0U, 0U);
+    	osMessageQueuePut(TelemQueueHandle, &valid_msg, 0U, 0U);
     	free(ptr);
     }
   }
@@ -345,8 +342,8 @@ void HAL_SPI_TxCpltCallback(SPI_HandleTypeDef *hspi)
 	if(ptr != NULL) free(ptr);
 }
 
-void sendToSidePnl(uint8_t pss_buf, uint8_t pss_length){
-	HAL_I2C_Master_Transmit(&hi2c1,SIDE_PNL_ADDR,pss_buf,pss_length,1000);
+void sendToSidePnl(uint8_t* pss_buf, uint8_t pss_length){
+	HAL_I2C_Master_Transmit(&hi2c1,SIDE_PNL_ADDR, pss_buf, pss_length, 1000);
 }
 /* USER CODE END Application */
 
