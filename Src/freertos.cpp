@@ -59,6 +59,7 @@
 #define ID_FIELD_OFFSET				(11)
 #define THIS_PILOT_ID				(105)
 #define SIDE_PNL_ADDR				(20)
+#define MAX_RADIO_SIZE				(255)
 
 /* USER CODE END PD */
 
@@ -87,9 +88,9 @@ typedef enum{
 } FrequencyBand_e;
 
 typedef struct{
-	FrequencyBand_e freq;
-	uint8_t length;
-	uint8_t buffer[255];
+	FrequencyBand_e freq;			// Working frequency
+	uint8_t length;					// Value in BYTES
+	uint8_t buffer[MAX_RADIO_SIZE];	// Buffer to store data
 } telepkt_t;
 
 enum REG_MAP_e{
@@ -131,6 +132,13 @@ const osThreadAttr_t SBAND_Task_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal1,
 };
+/* Definitions for MainTask */
+osThreadId_t MainTaskHandle;
+const osThreadAttr_t MainTask_attributes = {
+  .name = "MainTask",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -143,42 +151,26 @@ void sendToSidePnl(uint8_t* pss_buf, uint8_t pss_length);
 
 void StartUhfTask(void *argument);
 void StartSbandTask(void *argument);
+void StartMainTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
 void MX_FREERTOS_Init(void) {
-  /* USER CODE BEGIN Init */
-
-  /* USER CODE END Init */
-
-  /* USER CODE BEGIN RTOS_MUTEX */
-  /* add mutexes, ... */
-  /* USER CODE END RTOS_MUTEX */
-
-  /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
 	/* creation of TelecmdQueue */
 	TelecmdQueueHandle = osMessageQueueNew (TCQUEUE_OBJECTS, sizeof(telepkt_t),NULL);
 	/* creation of UHFTelemQueue */
 	TelemQueueHandle = osMessageQueueNew (TMQUEUE_OBJECTS, sizeof(telepkt_t), NULL);
-  /* USER CODE END RTOS_QUEUES */
-
-  /* Create the thread(s) */
-  /* creation of UHF_Task */
-  UHF_TaskHandle = osThreadNew(StartUhfTask, NULL, &UHF_Task_attributes);
-
-  /* creation of SBAND_Task */
-  SBAND_TaskHandle = osThreadNew(StartSbandTask, NULL, &SBAND_Task_attributes);
-
-  /* USER CODE BEGIN RTOS_EVENTS */
-  /* add events, ... */
-  frequencyFlagsHandle = osEventFlagsNew(NULL);
-  /* USER CODE END RTOS_EVENTS */
+	/* Create the thread(s) */
+	/* creation of UHF_Task */
+	UHF_TaskHandle = osThreadNew(StartUhfTask, NULL, &UHF_Task_attributes);
+	/* creation of SBAND_Task */
+	SBAND_TaskHandle = osThreadNew(StartSbandTask, NULL, &SBAND_Task_attributes);
+	/* creation of MainTask */
+	MainTaskHandle = osThreadNew(StartMainTask, NULL, &MainTask_attributes);
+	/* creation of Flags */
+	frequencyFlagsHandle = osEventFlagsNew(NULL);
 
 }
-
-// Add a main thread, this thread is used for beaconing and handle some
-// other commands from OBC.
 
 void StartUhfTask(void *argument)
 {
@@ -216,12 +208,12 @@ void StartUhfTask(void *argument)
 		}else if(uhf.tx_done)
 		{
 			uhf.tx_done = false;
+			HAL_UART_Transmit(&huart1, (uint8_t*)"UHF BAND TX done!\r\n" , sizeof("UHF BAND TX done!\r\n"), 100);
 		}
 		osMutexRelease(spi_mutex); // free the mutex
-		osDelay(1);
+		//osDelay(1);
 	}
 }
-
 void StartSbandTask(void *argument)
 {
 	sbd.radio_init(LR11XX_WITH_HF_PA, MAX_TX_POWER_SBD, _2G4Hz);
@@ -258,9 +250,39 @@ void StartSbandTask(void *argument)
 		}else if(sbd.tx_done)
 		{
 			sbd.tx_done = false;
+			HAL_UART_Transmit(&huart1, (uint8_t*)"SBAND TX done!\r\n" , sizeof("SBAND TX done!\r\n"), 100);
 		}
 		osMutexRelease(spi_mutex); // free the mutex
-		osDelay(1);
+		//osDelay(1);
+	}
+
+}
+
+void StartMainTask(void *argument)
+{
+	for(;;)
+	{
+		if(osMessageQueueGetCount(TelemQueueHandle)>0){
+			osMutexAcquire(spi_mutex, osWaitForever); // take mutex
+			// --------------------------------------------------
+			telepkt_t msg;
+			osMessageQueueGet(TelemQueueHandle, &msg, NULL, 0U);
+			if(msg.freq == UHF_BAND){
+				uhf.radio_tx_custom(msg.buffer, msg.length);
+			}else if(msg.freq == S_BAND){
+				sbd.radio_tx_custom(msg.buffer, msg.length);
+			}
+			// --------------------------------------------------
+			osMutexRelease(spi_mutex); // free the mutex
+		}else{
+			osMutexAcquire(spi_mutex, osWaitForever); // take mutex
+			// --------------------------------------------------
+			uhf.radio_tx_custom(beacon, sizeof(beacon));// Transmit beacon until you receive something from GS
+			osDelay(5000);								// 5 seconds delay (just for testing)
+			// --------------------------------------------------
+			osMutexRelease(spi_mutex); // free the mutex
+		}
+		osDelay(10);
 	}
 }
 
@@ -302,17 +324,17 @@ HEADER_CMD_e analyzeCmdToken(uint16_t* buf)
 }
 void HAL_SPI_RxCpltCallback(SPI_HandleTypeDef * hspi)
 {
-	telepkt_t msg;
   if(!obc_cmdWrite_flag){
     HEADER_CMD_e action = analyzeCmdToken(comd_token);
     if(action == CMD_READ){
       if(register_map == TC_REQ){
+		  telepkt_t msg;
     	  osMessageQueueGet(TelecmdQueueHandle, &msg, NULL, 0U);  	// Remember the buffer has the CRC included
     	  HAL_SPI_Transmit_DMA(&hspi1, msg.buffer, msg.length/2); 	// length is in BYTES, 1 word is 2 bytes
     }
     }else if(action == CMD_WRITE){
-      ptr = (uint16_t*)malloc(len+1); // Sum 1 word for CRC
-      HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)ptr, len+1);
+      ptr = (uint16_t*)malloc(len);
+      HAL_SPI_Receive_DMA(&hspi1, (uint8_t*)ptr, len);				// This is OK, we receive the #len+1 words
       obc_cmdWrite_flag = true;
     }else{
         // Do something, probably nothing
